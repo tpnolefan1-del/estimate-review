@@ -47,9 +47,32 @@ class EstimateParser:
             self.data["ro_number"] = m.group(1)
         
         # Vehicle description (usually after VEHICLE)
-        m = re.search(r"VEHICLE\s*\n(20\d{2}\s+[A-Z][A-Z0-9\s]+)", text)
+        m = re.search(r"VEHICLE\s*\n\s*(20\d{2}\s+\S+(?:\s+\S+){0,6})", text)
         if m:
-            self.data["year_make_model"] = m.group(1).strip().split("\n")[0]
+            raw = m.group(1).strip()
+            # Expand truncated makes
+            raw = re.sub(r"\bNISS\b", "NISSAN", raw, flags=re.I)
+            raw = re.sub(r"\bCHEV\b", "CHEVROLET", raw, flags=re.I)
+            raw = re.sub(r"\bTOYO\b", "TOYOTA", raw, flags=re.I)
+            raw = re.sub(r"\bHOND\b", "HONDA", raw, flags=re.I)
+            # Take year + make + model + trim (first 4 tokens)
+            parts = raw.split()
+            ymm_parts = []
+            for i, p in enumerate(parts[:4]):
+                if p.isdigit():
+                    ymm_parts.append(p)
+                elif i == 3 and len(p) <= 3:  # trim code like SL, LTZ
+                    ymm_parts.append(p.upper())
+                else:
+                    ymm_parts.append(p.title())
+            self.data["year_make_model"] = " ".join(ymm_parts)
+        
+        # Exterior color
+        m = re.search(r"Exterior Color:\s*([A-Za-z\s/]+?)(?:\s+Mileage|\s+VIN|\n|$)", text)
+        if m:
+            self.data["exterior_color"] = m.group(1).strip()
+        else:
+            self.data["exterior_color"] = ""
         
         # VIN
         m = re.search(r"VIN:\s*([A-Z0-9]{17})", text)
@@ -142,7 +165,7 @@ class MissedOpsAnalyzer:
         if any(x in ops_text for x in ["bumper cover", "bumper assy", "o/h bumper"]):
             if "headlamp" not in ops_text and "lamp" not in ops_text:
                 self._add("Remove & Install", "R&I Headlamp assemblies (both sides)", 0.5, 
-                          "Upper tabs of bumper cover typically sit behind headlamps; lamps must come off to service cover.",
+                          "CCC lists R&I of adjacent components for access as not included in the bumper cover R&I time. The upper tabs of the bumper cover sit behind the headlamps; the lamps must be removed to service the cover. Cited in CCC MOTOR Guide to Estimating — Labor Time Premise.",
                           trigger="Bumper cover R&I")
             if "energy absorber" not in ops_text and "impact bar" not in ops_text:
                 self._add("Remove & Install", "R&I Front energy absorber / impact bar", 0.4,
@@ -152,17 +175,18 @@ class MissedOpsAnalyzer:
         # Rule 2: Scans / Diagnostics — use realistic sublet pricing
         if "scan" not in ops_text and "diagnostic" not in ops_text:
             self._add("Pre/Post Scans", "Pre-repair diagnostic scan", 0.0, 0.0,
-                      "Required on modern vehicles to capture loss-related DTCs before repairs. Typical invoice ~$50–$130.")
-            self.suggestions[-1]["amount"] = 75.00
-            self.suggestions[-1]["description"] += " — est. $75"
+                      "Nissan (Nov 2025) requires pre- and post-repair scans on all 2008+ vehicles using the CONSULT diagnostic tool only. Honda (July 2025), Ford (Oct 2025), Kia, Toyota CRIB #191, FCA, and GM also require pre-repair scans. Not all DTCs illuminate a warning light. A full scan (OEM-grade scan tool, DTC read/clear, and documentation) is required. Cited in OEM position statements and CCC MOTOR Guide to Estimating — Labor Time Premise (Diagnostic scanning is not included).",
+                      trigger="Any collision repair")
+            self.suggestions[-1]["amount"] = 73.50  # P-Page code 12
+            self.suggestions[-1]["description"] += " — $73.50"
             self.suggestions[-1]["why"] = "Nissan (Nov 2025) requires pre- and post-repair scans on all 2008+ vehicles using the CONSULT diagnostic tool only. Honda (July 2025), Ford (Oct 2025), Kia, Toyota CRIB #191, FCA, and GM also require pre/post scans. Not all DTCs illuminate a warning light. Typical invoice $50–$130."
             self.suggestions[-1]["trigger"] = "Any collision repair"
             
             self._add("Pre/Post Scans", "Post-repair diagnostic scan", 0.0, 0.0,
                       "Toyota CRIB #191, FCA, and GM require a post-repair diagnostic scan to confirm all systems are functioning properly and to identify any systems that need repair, reprogramming, or initialization. GM requires retesting after all repairs are complete to verify faults have been repaired and no new faults were introduced. Typical invoice $50–$130.",
                       trigger="Any collision repair")
-            self.suggestions[-1]["amount"] = 100.00
-            self.suggestions[-1]["description"] += " — est. $100"
+            self.suggestions[-1]["amount"] = 128.95  # P-Page code Post
+            self.suggestions[-1]["description"] += " — $128.95"
         
         # Rule 3: Battery disconnect
         if "battery" not in ops_text and "disconnect" not in ops_text:
@@ -192,9 +216,22 @@ class MissedOpsAnalyzer:
                           "Toyota/Lexus and other OEMs call for post-collision air bag inspections even in non-deployment crashes. Shops have found deformed passenger air bags and tweaked mounting brackets with no dash warning lights or DTCs. Had the inspection not been performed, the damage would not have been found.",
                           trigger="SRS / air bag work")
         if "seat belt" not in ops_text and "seatbelt" not in ops_text and "belt inspection" not in ops_text:
-            self._add("Repair Procedures", "Post-collision seat belt inspection", 0.5, self.mech_rate,
-                      "GM, FCA, Toyota/Lexus, and most OEMs require inspection of all seat belts after any collision before returning the vehicle to the customer. Real-world inspections have uncovered deformed air bags and tweaked mounting brackets with no warning lights or DTCs. GM requires replacement of any seat belt system in use during a deployment event or if components are torn, worn, or damaged. Always inspect and replace the entire system if needed.",
-                      trigger="Any collision repair")
+            ymm = (self.data.get("year_make_model") or "").upper()
+            # Only fire for OEMs that have a published post-collision seat belt inspection statement
+            oem_statements = {
+                "GM": ["CHEVROLET", "GMC", "BUICK", "CADILLAC"],
+                "FCA": ["CHRYSLER", "DODGE", "JEEP", "RAM"],
+                "TOYOTA": ["TOYOTA", "LEXUS", "SCION"],
+            }
+            matched_oem = None
+            for oem, makes in oem_statements.items():
+                if any(mk in ymm for mk in makes):
+                    matched_oem = oem
+                    break
+            if matched_oem:
+                self._add("Repair Procedures", "Post-collision seat belt inspection", 0.5, self.mech_rate,
+                          f"{matched_oem} requires inspection of all seat belts after any collision before returning the vehicle to the customer. Real-world inspections have uncovered deformed air bags and tweaked mounting brackets with no warning lights or DTCs. {matched_oem} requires replacement of any seat belt system in use during a deployment event or if components are torn, worn, or damaged. Cited in {matched_oem} collision repair position statements.",
+                          trigger=f"{matched_oem} vehicle — any collision repair")
         # Rule: GM ADAS bumper fascia — substrate repair not approved
         if any(x in ops_text for x in ["bumper", "fascia"]) and any(x in ops_text for x in ["rpr", "repair", "substrate", "filler"]):
             if self._has_option(["radar", "acc", "adas", "parking", "blind"]) or "adas" in ops_text:
@@ -231,6 +268,114 @@ class MissedOpsAnalyzer:
                 self._add("Repair Procedures", "Re-fit labor (aftermarket / reman parts)", 0.5, self.body_rate,
                           "The published replace time assumes a new OEM part, and pre-fitment does not apply to an aftermarket or remanufactured part, so fitting one is work outside that time. MOTOR does not include a 2nd fitment of a component to the vehicle.",
                           trigger="Aftermarket / remanufactured part on estimate")
+        
+        # OEM Parts Conversion — flag aftermarket parts when OEM prohibits them
+        ymm = (self.data.get("year_make_model") or "").upper()
+        # OEMs with explicit no-aftermarket / no-salvage position statements (from oem1stop.com)
+        # Exact language + PDF link for each
+        oem_statements = {
+            "GM": {
+                "makes": ["CHEVROLET", "GMC", "BUICK", "CADILLAC"],
+                "quote": "GM does not approve or support the use of salvage, recycled/used, or non-Genuine aftermarket parts on Chevrolet, Buick, GMC, and Cadillac vehicles.",
+                "link": "https://oem1stop.com/"
+            },
+            "Mazda": {
+                "makes": ["MAZDA"],
+                "quote": "Mazda North American Operations does not authorize the use of the following parts: aftermarket, third-party replacement parts, gray market, imitation parts, used parts, damaged fasteners and hardware, salvaged/recycled parts and components, reconditioned parts.",
+                "link": "http://oem1stop.com/wp-content/uploads/2026/10/Mazda_Parts_Position_Statement12-6-24.pdf"
+            },
+            "Nissan": {
+                "makes": ["NISSAN", "INFINITI"],
+                "quote": "Nissan North America DOES NOT approve of the use of aftermarket, gray market, or imitation parts. Nissan North America DOES NOT approve of the repair of our vehicles with salvage parts or assemblies.",
+                "link": "http://oem1stop.com/wp-content/uploads/2026/10/Nissan_Pos_AM-Parts-Usage_20168-7-20.pdf"
+            },
+            "Volkswagen": {
+                "makes": ["VOLKSWAGEN", "VW", "AUDI"],
+                "quote": "VWoA does not support the repair of Volkswagen vehicles with recycled vehicle parts or assemblies. Recycled, salvaged, aftermarket, and reconditioned parts (including body parts, wheels, and safety restraint components) are not authorized by VWoA.",
+                "link": "https://oem1stop.com/wp-content/uploads/2026/10/VW_Pos_Recycled-Parts_20263-5-26.pdf"
+            },
+            "Lincoln": {
+                "makes": ["LINCOLN"],
+                "quote": "The Lincoln Motor Company does not approve the use of recycled, salvaged, aftermarket or reconditioned parts. Recycled, salvaged, aftermarket and reconditioned parts (including body parts, wheels and safety restraint components) are not authorized by The Lincoln Motor Company.",
+                "link": "https://www.oem1stop.com/sites/default/files/Lincoln_Use_of_NonOEM_Parts%20-%20Position%20Statement%20_FNL-2022.pdf"
+            },
+            "Mercedes-Benz": {
+                "makes": ["MERCEDES", "MERCEDES-BENZ"],
+                "quote": "Mercedes-Benz does not approve of the use of aftermarket or third-party replacement parts. Mercedes-Benz does not approve of the use of components removed from a vehicle that was damaged, burned, flooded, scrapped, or involved in a previous collision.",
+                "link": "http://oem1stop.com/wp-content/uploads/2026/10/MBUSA-Position-Statement-for-Genuine-Replacement-Parts.pdf"
+            },
+            "Genesis": {
+                "makes": ["GENESIS"],
+                "quote": "GENESIS MOTOR AMERICA DOES NOT RECOMMEND THE USE OF COUNTERFEIT, GREY MARKET, AFTERMARKET, IMITATION, RECYCLED COLLISION REPAIR PARTS, ALTERNATE OR OTHER NON-ORIGINAL EQUIPMENT PARTS.",
+                "link": "https://oem1stop.com/sites/default/files/Genesis_Pos_Non-OEM%20Parts%284-23%29.pdf"
+            },
+            "Rivian": {
+                "makes": ["RIVIAN"],
+                "quote": "Rivian does not recommend the use of aftermarket parts on any Rivian vehicle. Rivian does not support the use of aftermarket, Optional OEM (Opt-OE), alternative, reverse-engineered, used, salvaged, or externally re-manufactured parts. Rivian does not recommend the use of any salvaged, used, or recycled part that is a component of the Driver+ system (ADAS).",
+                "link": "https://oem1stop.com/sites/default/files/Rivian_Pos_Repair-Standards%284-28-26%29.pdf"
+            },
+        }
+        matched_oem = None
+        matched_info = None
+        for oem, info in oem_statements.items():
+            if any(mk in ymm for mk in info["makes"]):
+                matched_oem = oem
+                matched_info = info
+                break
+        if matched_oem and matched_info:
+            am_parts = []
+            for item in self.data.get("line_items", []):
+                desc = (item.get("description") or "").lower()
+                if any(x in desc for x in ["a/m", "aftermarket", "lkq", "salvage", "recycled", "used"]):
+                    am_parts.append(item.get("description", "")[:60])
+            if am_parts:
+                parts_list = "; ".join(am_parts[:5])
+                self._add("OEM Compliance", "OEM Parts Conversion", 0.0, 0.0,
+                          f"{matched_info['quote']} Parts flagged: {parts_list}. Convert each to the OEM part and bill the difference. Position statement: {matched_info['link']}",
+                          trigger=f"{matched_oem} vehicle with aftermarket parts")
+                self.suggestions[-1]["amount"] = 0.00
+        
+        # LKQ / used parts when OEM requires OEM
+        if matched_oem:
+            lkq_parts = []
+            for item in self.data.get("line_items", []):
+                desc = (item.get("description") or "").lower()
+                if any(x in desc for x in ["lkq", "salvage", "recycled", "used", "rcy"]):
+                    lkq_parts.append(item.get("description", "")[:60])
+            if lkq_parts:
+                parts_list = "; ".join(lkq_parts[:5])
+                self._add("OEM Compliance", "LKQ / used parts not approved", 0.0, 0.0,
+                          f"{matched_info['quote']} Parts flagged: {parts_list}. Replace with genuine OEM parts. Position statement: {matched_info['link']}",
+                          trigger=f"{matched_oem} vehicle with LKQ / used parts")
+                self.suggestions[-1]["amount"] = 0.00
+        
+        # Structural parts must be OEM
+        structural_keywords = ["rail", "apron", "pillar", "rocker", "frame", "unibody", "reinforcement", "crossmember"]
+        has_structural = any(any(kw in (item.get("description") or "").lower() for kw in structural_keywords) for item in self.data.get("line_items", []))
+        if has_structural and matched_oem:
+            non_oem_struct = []
+            for item in self.data.get("line_items", []):
+                desc = (item.get("description") or "").lower()
+                if any(kw in desc for kw in structural_keywords) and any(x in desc for x in ["a/m", "aftermarket", "lkq", "salvage"]):
+                    non_oem_struct.append(item.get("description", "")[:60])
+            if non_oem_struct:
+                parts_list = "; ".join(non_oem_struct[:5])
+                self._add("OEM Compliance", "Structural parts must be OEM", 0.0, 0.0,
+                          f"{matched_oem} requires genuine OEM parts for structural components. Non-OEM structural parts flagged: {parts_list}. Structural repairs performed with non-OEM parts may not restore the vehicle to pre-accident condition. Quoted from {matched_oem} collision repair position statements.",
+                          trigger=f"{matched_oem} vehicle with non-OEM structural parts")
+                self.suggestions[-1]["amount"] = 0.00
+        
+        # ADAS bumper — aftermarket not approved when ADAS shines through or is mounted in bumper
+        if matched_oem and any(x in ops_text for x in ["bumper", "fascia"]):
+            has_adas = self._has_option(["radar", "acc", "adas", "blind", "park assist", "camera"]) or any(x in ops_text for x in ["radar", "camera", "blind", "park assist", "adas"])
+            if has_adas:
+                am_bumper = any(any(x in (item.get("description") or "").lower() for x in ["a/m", "aftermarket", "lkq"]) and any(x in (item.get("description") or "").lower() for x in ["bumper", "fascia"]) for item in self.data.get("line_items", []))
+                if am_bumper:
+                    self._add("OEM Compliance", "ADAS bumper must be OEM", 0.0, 0.0,
+                              f"{matched_oem} does not approve aftermarket, reconditioned, or salvage bumpers/fascias on ADAS-equipped vehicles. ADAS components (blind spot, radar, cameras) may be mounted in or shine through the bumper. Only genuine OEM bumper assemblies are approved. Quoted from {matched_oem} ADAS position statements.",
+                              trigger=f"{matched_oem} ADAS vehicle with aftermarket bumper")
+                    self.suggestions[-1]["amount"] = 0.00
+        
         if ("door" in ops_text and "repl" in ops_text) or ("door" in ops_text and any(x in ops_text for x in ["detrim", "r&i", "remove", "refn", "refinish"])):
             if "watershield" not in ops_text and "water shield" not in ops_text and "butyl" not in ops_text:
                 self._add("Miscellaneous", "Door Watershield Sealant", 0.0, 0.0,
@@ -238,10 +383,71 @@ class MissedOpsAnalyzer:
                           trigger="Door shell replacement or door detrim/removal for refinish")
                 self.suggestions[-1]["amount"] = 24.00
                 self.suggestions[-1]["description"] += " — est. $24"
+        
+        # Front door replacement → blend fender + blend rear door + related R&I
+        front_door_repl = False
+        for item in self.data.get("line_items", []):
+            line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
+            if "front door" in line_text and any(x in line_text for x in ["repl", "section"]):
+                front_door_repl = True
+                break
+        if front_door_repl:
+            # Blend fender
+            if "fender" not in ops_text or "blnd" not in ops_text:
+                self._add("Repair Procedures", "Blend Fender (front door replacement)", 1.0, self.paint_rate,
+                          "CCC lists blending into adjacent panels as not included in the panel's standard labor allowance. Fresh paint on the front door rarely matches the aged factory finish on the fender beside it, so the color is blended into the fender and the whole panel is cleared to make the change between them invisible. Cited in CCC MOTOR Guide to Estimating — Basic Color Coat Application: 'Does not include: Blending into adjacent panels.'",
+                          trigger="Front door replacement")
+            # Blend rear door
+            if "rear door" not in ops_text or "blnd" not in ops_text:
+                self._add("Repair Procedures", "Blend Rear Door (front door replacement)", 1.0, self.paint_rate,
+                          "Fresh paint on the front door rarely matches the aged factory finish on the rear door beside it. Blend the rear door and clear the entire panel to make the color transition invisible.",
+                          trigger="Front door replacement")
+            # Fender blend access
+            if "headlamp" not in ops_text and "head lamp" not in ops_text:
+                self._add("Remove & Install", "R&I Headlamp (fender blend access)", 0.4, self.body_rate,
+                          "Required for access to blend the fender and to protect the lamp from overspray.",
+                          trigger="Blend fender")
+            if "bumper cover" not in ops_text and "front bumper" not in ops_text:
+                self._add("Remove & Install", "R&I Front Bumper Cover (fender blend access)", 0.6, self.body_rate,
+                          "Required for access to blend the fender and to protect the bumper from overspray.",
+                          trigger="Blend fender")
+            if "fender liner" not in ops_text:
+                self._add("Remove & Install", "R&I Fender Liner (fender blend access)", 0.3, self.body_rate,
+                          "Required for access to blend the fender and to protect the liner from overspray.",
+                          trigger="Blend fender")
+            if "rocker molding" not in ops_text and "rocker moulding" not in ops_text:
+                self._add("Remove & Install", "R&I Rocker Molding (if equipped)", 0.2, self.body_rate,
+                          "Required for access to blend the fender if the vehicle is equipped with a rocker molding.",
+                          trigger="Blend fender")
+            if "mud guard" not in ops_text and "mudguard" not in ops_text:
+                self._add("Remove & Install", "R&I Mud Guard (if equipped)", 0.2, self.body_rate,
+                          "Required for access to blend the fender if the vehicle is equipped with a mud guard.",
+                          trigger="Blend fender")
+            if "upper molding" not in ops_text and "fender molding" not in ops_text:
+                self._add("Remove & Install", "R&I Upper Molding for Fender (if equipped)", 0.2, self.body_rate,
+                          "Required for access to blend the fender if the vehicle is equipped with an upper fender molding.",
+                          trigger="Blend fender")
+            # Rear door blend access
+            if "belt molding" not in ops_text and "belt moulding" not in ops_text:
+                self._add("Remove & Install", "R&I Rear Door Belt Molding", 0.3, self.body_rate,
+                          "Required to detrim the rear door for blending. The belt molding must be removed to access the blend area and protect it from overspray.",
+                          trigger="Blend rear door")
+            if "outer handle" not in ops_text and "door handle" not in ops_text:
+                self._add("Remove & Install", "R&I Rear Door Outer Handle", 0.3, self.body_rate,
+                          "Required to detrim the rear door for blending. The outer handle must be removed to access the blend area and protect it from overspray.",
+                          trigger="Blend rear door")
+            if "trim panel" not in ops_text and "door panel" not in ops_text:
+                self._add("Remove & Install", "R&I Rear Door Interior Trim Panel", 0.4, self.body_rate,
+                          "Required to detrim the rear door for blending. The interior trim panel must be removed to access the blend area and protect it from overspray.",
+                          trigger="Blend rear door")
+        
         if "quarter" in ops_text and "repl" in ops_text:
-            if "hem flange" not in ops_text and "rolled hem" not in ops_text:
+            # Only trigger rolled hem flange verification if an LKQ / used quarter panel is on the estimate
+            has_lkq_quarter = any("lkq" in (item.get("description","") + " " + item.get("operation","")).lower() and "quarter" in (item.get("description","") + " " + item.get("operation","")).lower() for item in self.data.get("line_items", []))
+            if has_lkq_quarter and "hem flange" not in ops_text and "rolled hem" not in ops_text:
                 self._add("Repair Procedures", "Rolled hem flange verification (quarter panel)", 0.0, 0,
-                          "I-CAR notes that some vehicles have outer quarter panels with rolled hem flanges. Check the OEM Partial Part Replacement Search (red Outer Uniside box) to confirm. Recycled outer quarter panels with rolled hem flanges require special consideration. Starting with 2015 model year vehicles, the note will state whether the vehicle has, does not have, or has not yet been identified for a rolled hem flange.")
+                          "I-CAR notes that some vehicles have outer quarter panels with rolled hem flanges. Recycled (LKQ) outer quarter panels with rolled hem flanges require special consideration and may not be approved. Check the OEM Partial Part Replacement Search to confirm. Starting with 2015 model year vehicles, the note will state whether the vehicle has, does not have, or has not yet been identified for a rolled hem flange. Consider OEM instead of LKQ.",
+                          trigger="LKQ / used quarter panel on estimate")
         if any(x in ops_text for x in ["radar", "camera", "sensor", "adas", "blind", "park assist", "sonar"]):
             if "aftermarket" in ops_text or "a/m" in ops_text or "salvage" in ops_text or "recycled" in ops_text or "lkq" in ops_text:
                 self._add("Parts Differences", "Genuine OEM ADAS component required", 0.0, 0,
@@ -303,12 +509,140 @@ class MissedOpsAnalyzer:
                 self.suggestions[-1]["amount"] = 130.93
                 self.suggestions[-1]["description"] += " — est. $130.93"
         
+        # Heat repair on structural / HSS — FCA and Nissan prohibit
+        if any(x in ops_text for x in ["heat", "heat repair", "hot", "oxy", "torch"]) and any(x in ops_text for x in ["structural", "rail", "apron", "pillar", "hss", "uhss"]):
+            ymm = (self.data.get("year_make_model") or "").upper()
+            if any(mk in ymm for mk in ["CHRYSLER", "DODGE", "JEEP", "RAM", "FIAT", "NISSAN"]):
+                self._add("OEM Compliance", "Heat repair not approved on structural / HSS", 0.0, 0.0,
+                          "FCA US LLC: If heat is used to straighten structural high-strength steels, advanced high-strength steel or ultra-high strength steel, the component must be replaced. Cold straightening may be used without replacement. Nissan: The repair of reinforcements (such as side members) by heating is not recommended since it may weaken the component. When heating is unavoidable, do not heat high-strength steel parts above 550°C (1022°F). Cited in FCA Use of Heat and Nissan Unibody/Structural Repair position statements on oem1stop.com.",
+                          trigger="Heat repair on structural / HSS panel")
+                self.suggestions[-1]["amount"] = 0.00
+
+        # OEM glass — several OEMs require OEM glass (ADAS integration, structure)
+        if any(x in ops_text for x in ["glass", "windshield", "wind shield"]) and any(x in ops_text for x in ["a/m", "aftermarket", "lkq", "salvage"]):
+            ymm = (self.data.get("year_make_model") or "").upper()
+            if any(mk in ymm for mk in ["NISSAN", "FORD", "MERCEDES", "CHRYSLER", "DODGE", "JEEP", "RAM", "RIVIAN"]):
+                self._add("OEM Compliance", "OEM glass required", 0.0, 0.0,
+                          "Nissan: DOES NOT support the use of aftermarket or recycled glass. Ford: does not endorse the use of non-Ford original equipment glass. Mercedes-Benz: Aftermarket variants do not meet the exacting specifications of genuine Mercedes-Benz glass. FCA: does not approve of or recognize glass replacement procedures where genuine Mopar Parts are not used. Glass integrates with ADAS cameras and provides structural rigidity. Cited in OEM glass position statements on oem1stop.com.",
+                          trigger="Aftermarket / salvage glass on estimate")
+                self.suggestions[-1]["amount"] = 0.00
+
+        # Reconditioned wheels — FCA and Lincoln prohibit
+        if any(x in ops_text for x in ["wheel", "rim"]) and any(x in ops_text for x in ["recond", "reconditioned", "refinish", "straighten"]):
+            ymm = (self.data.get("year_make_model") or "").upper()
+            if any(mk in ymm for mk in ["CHRYSLER", "DODGE", "JEEP", "RAM", "LINCOLN", "FORD", "RIVIAN"]):
+                self._add("OEM Compliance", "Reconditioned wheels not approved", 0.0, 0.0,
+                          "FCA US LLC does not recommend the use of reconditioned wheels (wheels that have been damaged and repaired) because they can result in a sudden catastrophic wheel failure. Lincoln: does not approve the remanufacturing/refinishing of steel or aluminum wheels when it involves re-machining, re-plating, welding, bending, straightening, or reforming. Rivian: does not support or approve the use of reconditioned (damaged and repaired) wheels. Reconditioning may include heating, straightening, welding, material removal, reshaping, or re-plating, which can affect the strength of the wheel. Cited in OEM position statements on oem1stop.com.",
+                          trigger="Reconditioned / refinished wheel on estimate")
+                self.suggestions[-1]["amount"] = 0.00
+
+        # OEM-specific scan tool requirement
+        ymm = (self.data.get("year_make_model") or "").upper()
+        oem_scan_tools = {
+            "Honda": {"makes": ["HONDA", "ACURA"], "tool": "i-HDS", "quote": "The use of the i-HDS software is the only way to perform a proper OEM Diagnostic Scan for Honda and Acura vehicles."},
+            "Nissan": {"makes": ["NISSAN", "INFINITI"], "tool": "CONSULT", "quote": "Nissan (Nov 2025) requires pre- and post-repair scans on all 2008+ vehicles using the CONSULT diagnostic tool only."},
+            "FCA": {"makes": ["CHRYSLER", "DODGE", "JEEP", "RAM", "FIAT"], "tool": "wiTECH", "quote": "Use of the Mopar wiTECH vehicle diagnostic tester (scan tool) is necessary before and after collision repair."},
+            "Ford": {"makes": ["FORD", "LINCOLN"], "tool": "FDRS / IDS", "quote": "Vehicle diagnostic testing, including pre/post scanning, module programming and system calibrations is to be conducted using required Ford Motor Company diagnostic software (FDRS / IDS) and recommended hardware."},
+            "Mazda": {"makes": ["MAZDA"], "tool": "Genuine Mazda scan tool", "quote": "Mazda requires pre- and post-repair scans using a genuine Mazda scan tool."},
+            "Rivian": {"makes": ["RIVIAN"], "tool": "RiDE (Rivian Diagnostic Engine)", "quote": "A pre-repair and post-repair scan of the vehicle using the Rivian Diagnostic Engine (RiDE) is required. All scans and calibrations must be performed by Rivian Certified Technicians."},
+        }
+        for oem, info in oem_scan_tools.items():
+            if any(mk in ymm for mk in info["makes"]):
+                if "scan" not in ops_text or info["tool"].lower() not in ops_text:
+                    self._add("Pre/Post Scans", f"OEM scan tool required ({info['tool']})", 0.0, 0.0,
+                              f"{info['quote']} Aftermarket scan tools may not contain the software needed to properly assess all systems. Position statement available on oem1stop.com.",
+                              trigger=f"{oem} vehicle — OEM scan tool required")
+                    self.suggestions[-1]["amount"] = 0.00
+                break
+
+        # Liftgate / deck lid / trunk lid repair or replacement → align hinges and drop headliner
+        # These terms are equivalent — only one will be present on any vehicle
+        lid_work = False
+        lid_name = "liftgate"
+        for item in self.data.get("line_items", []):
+            line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
+            if any(x in line_text for x in ["liftgate", "lift gate", "deck lid", "decklid", "trunk lid", "trunklid"]) and any(x in line_text for x in ["rpr", "repair", "repl", "replace", "r&i"]):
+                lid_work = True
+                if "deck" in line_text:
+                    lid_name = "deck lid"
+                elif "trunk" in line_text:
+                    lid_name = "trunk lid"
+                else:
+                    lid_name = "liftgate"
+                break
+        if lid_work:
+            if "align" not in ops_text or "hinge" not in ops_text:
+                self._add("Miscellaneous", f"Align Right {lid_name.title()} Hinge", 0.2, self.body_rate,
+                          f"A repaired or replaced {lid_name} can sit out of line, so it is adjusted at the right hinge to set even gaps to the body around it. The published flat {lid_name} time under-allows this fitment; it is separate body labor. CCC lists hinge alignment as not included in the {lid_name} R&I or repair time.",
+                          trigger=f"{lid_name.title()} repair, replacement, or R&I")
+                self._add("Miscellaneous", f"Align Left {lid_name.title()} Hinge", 0.2, self.body_rate,
+                          f"A repaired or replaced {lid_name} can sit out of line, so it is adjusted at the left hinge to set even gaps to the body around it. The published flat {lid_name} time under-allows this fitment; it is separate body labor. CCC lists hinge alignment as not included in the {lid_name} R&I or repair time.",
+                          trigger=f"{lid_name.title()} repair, replacement, or R&I")
+            if "headliner" not in ops_text and lid_name == "liftgate":
+                self._add("Remove & Install", f"Drop Headliner ({lid_name} electrical access)", 0.8, self.body_rate,
+                          f"Required to access the {lid_name} electrical connector for removal and reinstall. The headliner must be dropped to disconnect the wiring harness at the {lid_name}. CCC lists R&I of adjacent components for access as not included in the {lid_name} R&I time.",
+                          trigger=f"{lid_name.title()} repair, replacement, or R&I")
+
+        # Rear body panel replacement — comprehensive access and materials
+        rear_body_repl = False
+        for item in self.data.get("line_items", []):
+            line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
+            if any(x in line_text for x in ["rear body", "rear panel", "body panel"]) and "repl" in line_text:
+                rear_body_repl = True
+                break
+        if rear_body_repl:
+            # Access operations (hours from Tucson 3721 estimate)
+            access_ops = [
+                ("R&I Liftgate Opening Weatherstrip", 0.5, "Required to access the rear body panel and to reseal the opening after panel replacement."),
+                ("R&I Rear Sill Trim", 0.2, "Required for access to the rear body panel and to protect the trim during welding."),
+                ("R&I Rear Floor Covering", 0.1, "Required for access to the rear body panel and to protect the floor during welding."),
+                ("R&I Spare Tire (if equipped)", 0.2, "Required for access to the rear body panel and to protect the spare during welding."),
+                ("R&I Rear Cargo Box (if equipped)", 0.3, "Required for access to the rear body panel and to protect the cargo box during welding."),
+                ("R&I Jack and Jack Storage (if equipped)", 0.2, "Required for access to the rear body panel and to protect the jack during welding."),
+                ("R&I Exhaust (rearward of muffler)", 1.1, "Required for access to the rear body panel and to protect the exhaust during welding."),
+                ("R&I Rear Seat", 0.5, "Required for access to the rear body panel and to protect the seat during welding."),
+                ("R&I Lower Interior Quarter Trims", 0.4, "Required for access to the rear body panel and to protect the trim during welding."),
+                ("R&I Rear Quarter Vent", 0.1, "Required for access to the rear body panel and to protect the vent during welding."),
+                ("R&I Rear Fender Liner (weld zone)", 0.4, "Required to protect the liner from weld spatter and fire during welding of the rear body panel."),
+                ("Disconnect Battery", 0.3, "Required before welding and electrical work to prevent system faults and accidental deployment."),
+                ("D&R Wiring Harness", 0.5, "Required to disconnect the wiring harness for rear body panel replacement and to protect it during welding."),
+                ("R&I Rear Blind Spot Radar (if equipped)", 0.3, "Required for access and to protect the radar during rear body panel replacement. Recalibration required after reinstall."),
+                ("R&I Rear Bumper Brackets", 0.1, "Required to remove the bumper brackets attached to the body for rear body panel replacement."),
+                ("R&I Rear Tail Lamps", 0.4, "Required for access to the rear body panel and to protect the lamps during welding."),
+                ("R&I Battery (if equipped in rear)", 0.5, "Required if the battery is located in the rear of the vehicle to protect it during welding."),
+            ]
+            for desc, hrs, why in access_ops:
+                # Check if this specific operation is already on the estimate (flexible match)
+                desc_lower = desc.lower()
+                # Extract key words from the description
+                key_words = [w for w in desc_lower.replace("r&i ", "").replace("(if equipped)", "").replace("(weld zone)", "").replace("(", " ").replace(")", " ").split() if len(w) > 2]
+                # Skip if any significant keyword from the description is already in the estimate
+                already_present = any(kw in ops_text for kw in key_words[:2])  # Check first 2 significant words
+                if not already_present:
+                    self._add("Remove & Install", desc, hrs, self.body_rate, why, trigger="Rear body panel replacement")
+            # Weld operations
+            if "weld burn" not in ops_text and "weldburn" not in ops_text:
+                self._add("Repair Procedures", "Weld Burn Rpr/Refn (adjacent panels)", 0.5, self.body_rate,
+                          "Required to repair and refinish weld burn on adjacent panels after welding the rear body panel. CCC lists weld zone refinish as not included in the panel replacement time.",
+                          trigger="Rear body panel replacement")
+            if "test weld" not in ops_text:
+                self._add("Repair Procedures", "Test Weld", 0.3, self.body_rate,
+                          "Required to verify weld quality and settings before welding the rear body panel. Destructive weld testing is not included in the panel replacement time.",
+                          trigger="Rear body panel replacement")
+            # 2nd color setup for structural color
+            if "color" not in ops_text or "structural" not in ops_text:
+                self._add("Repair Procedures", "2nd Color Set-up (structural color)", 0.5, self.paint_rate,
+                          "Required when the structural color (e-coat / primer color) differs from the exterior color. A second color mix is needed for the interior/structural surfaces of the rear body panel.",
+                          trigger="Rear body panel replacement")
+
         # Rule: Wet-sand, de-nib, and precision buff for black finishes
         if any(x in ops_text for x in ["refn", "refinish", "blend", "blnd", "clear coat", "paint"]):
-            is_black = "black" in ops_text
+            exterior = (self.data.get("exterior_color") or "").lower()
+            is_black = "black" in exterior and "not black" not in exterior
             if is_black and "wet sand" not in ops_text and "denib" not in ops_text and "de-nib" not in ops_text and "buff" not in ops_text:
                 self._add("Repair Procedures", "Wet-sand, de-nib & precision buff (black)", 0.8, self.paint_rate,
-                          "Required on black finishes. Black shows every imperfection, so wet-sanding, de-nibbing, and a precision buff are needed for a proper finish.")
+                          "Required on black finishes. Black shows every imperfection, so wet-sanding, de-nibbing, and a precision buff are needed for a proper finish.",
+                          trigger="Black exterior color")
 
         # Rule: Tint Color time for non-black finishes
         if any(x in ops_text for x in ["refn", "refinish", "blend", "blnd", "clear coat", "paint"]):
@@ -335,25 +669,56 @@ class MissedOpsAnalyzer:
                       "Required first step on tri-coat / 3-stage finishes. A let-down panel shows how many midcoat layers are needed so the repair matches the vehicle.",
                       trigger="3-stage / tri-coat refinish")
 
+        # Matte paint special considerations
+        exterior = (self.data.get("exterior_color") or "").lower()
+        if "matte" in exterior and any(x in ops_text for x in ["refn", "refinish", "blend", "blnd", "clear coat", "paint"]):
+            if "matte clear" not in ops_text and "matte finish" not in ops_text:
+                self._add("Repair Procedures", "Matte finish special procedures", 0.0, 0.0,
+                          "OEM refinish procedures for matte finishes prohibit wet-sanding, de-nibbing, and buffing — these operations destroy the matte appearance. Use OEM-approved matte clear coat and follow the OEM refinish procedure exactly. Cited in OEM paint and refinish procedures for matte finishes.",
+                          trigger="Matte exterior color")
+                self.suggestions[-1]["amount"] = 0.00
+
         # Blend-specific triggers
         # Blending the right rear door
         for item in self.data.get("line_items", []):
             line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
             if ("rear door" in line_text or "rt door" in line_text or "right door" in line_text) and any(x in line_text for x in ["blnd", "blend"]):
-                if "feather" not in ops_text and "prime" not in ops_text:
-                    self._add("Repair Procedures", "Feather, Prime & Block (blend right rear door)", 0.5, self.paint_rate,
-                              "Blending the right rear door requires feather, prime, and block to properly prepare the blend edge so the clear coat and color transition cleanly into the adjacent panel.",
-                              trigger="Blend right rear door")
                 break
         # Blending the roof rail or A-pillar
         for item in self.data.get("line_items", []):
             line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
             if any(x in line_text for x in ["roof rail", "a-pillar", "a pillar", "aperture"]) and any(x in line_text for x in ["blnd", "blend"]):
-                if "feather" not in ops_text and "prime" not in ops_text:
-                    self._add("Repair Procedures", "Feather, Prime & Block (blend roof rail / A-pillar)", 0.5, self.paint_rate,
-                              "Blending the roof rail or A-pillar requires feather, prime, and block to properly prepare the blend edge so the clear coat and color transition cleanly.",
-                              trigger="Blend roof rail or A-pillar")
                 break
+        
+        # Feather, Prime & Block — 20% of body labor time for repaired panels
+        # CCC: Feather, prime and block is not included in the repair time.
+        # P-Page code Q_PC952_US: 0.6 paint (baseline), but calculate as 20% of repair labor
+        repair_hours = 0.0
+        for item in self.data.get("line_items", []):
+            op = (item.get("operation") or "").lower()
+            desc = item.get("description") or ""
+            if "rpr" in op or "repair" in op:
+                # Extract hours from description (e.g., "5.0" or "0.5")
+                import re
+                hrs_match = re.search(r"(\d+\.?\d*)\s*(?:hr|hour)?", desc)
+                if hrs_match:
+                    repair_hours += float(hrs_match.group(1))
+        has_refinish = any(x in ops_text for x in ["refn", "refinish", "paint", "clear coat"])
+        if repair_hours > 0 and has_refinish and "feather" not in ops_text and "prime" not in ops_text and "block" not in ops_text:
+            fpb_hours = round(repair_hours * 0.20, 1)
+            if fpb_hours < 0.3:
+                fpb_hours = 0.3  # Minimum
+            self._add("Repair Procedures", "Feather, Prime & Block", fpb_hours, self.paint_rate,
+                      f"Feather, prime and block is required to take the repaired area from 150 grit to 320 grit to prepare the panel for the refinish process. Calculated at 20% of the body labor time to repair the panel ({repair_hours} hr × 20% = {fpb_hours} hr refinish). CCC lists feather, prime and block as not included in the repair time. P-Page code Q_PC952_US.",
+                      trigger="Repaired panel with refinish")
+            # Primer material — calculated at material rate × refinish hours
+            material_rate = self.data.get("labor_rates", {}).get("paint_supplies", 40.0)
+            primer_amount = round(fpb_hours * material_rate, 2)
+            self._add("Parts Differences", "Primer (Feather, Prime & Block)", 0.0, 0.0,
+                      f"Primer is one of the most expensive materials used in a body shop. Required to build the repaired area from 150 grit to 320 grit before refinish. Calculated at {fpb_hours} hr × ${material_rate:.2f}/hr material rate = ${primer_amount:.2f}.",
+                      trigger="Repaired panel with refinish")
+            self.suggestions[-1]["amount"] = primer_amount
+            self.suggestions[-1]["description"] += f" — ${primer_amount:.2f}"
 
         # Quarter panel replacement / sectioning triggers
         quarter_repl = False
@@ -475,6 +840,55 @@ class MissedOpsAnalyzer:
                           "Required for access when removing the headliner. GM procedure is part of the headlining trim panel replacement for quarter panel sectioning.",
                           trigger="Quarter panel replacement / sectioning")
 
+        # Roof rail refinish → blend quarter panel + related R&I
+        roof_rail_refn = False
+        for item in self.data.get("line_items", []):
+            line_text = (item.get("description", "") + " " + item.get("operation", "")).lower()
+            if "roof rail" in line_text and any(x in line_text for x in ["refn", "refinish", "rpr", "repair"]):
+                roof_rail_refn = True
+                break
+        if roof_rail_refn:
+            if "quarter" not in ops_text or "blnd" not in ops_text:
+                self._add("Repair Procedures", "Blend Quarter Panel (extend clear from roof rail)", 1.5, self.paint_rate,
+                          "CCC lists extension of clear coat to adjacent panels as not included. Refinish on the roof rail requires the clear coat to be extended to the nearest breaking point, which is the quarter panel. Blend the quarter panel and clear the entire panel to avoid a visible blend line. Cited in CCC MOTOR Guide to Estimating — Clear Coat Finishes and Extension of Clear Coat.",
+                          trigger="Roof rail refinish")
+            if "bumper cover" not in ops_text and "rear bumper" not in ops_text:
+                self._add("Remove & Install", "R&I Rear Bumper Cover", 0.8, self.body_rate,
+                          "Required for access to blend the quarter panel and to protect the bumper from overspray.",
+                          trigger="Blend quarter panel")
+            if "tail lamp" not in ops_text and "taillamp" not in ops_text:
+                self._add("Remove & Install", "R&I RT Tail Lamp", 0.3, self.body_rate,
+                          "Required for access to blend the quarter panel and to protect the lamp from overspray.",
+                          trigger="Blend quarter panel")
+            if "quarter glass" not in ops_text and "qtr glass" not in ops_text:
+                self._add("Remove & Install", "R&I RT Quarter Glass", 0.6, self.body_rate,
+                          "Required for access to blend the quarter panel and to protect the glass from overspray and refinish materials.",
+                          trigger="Blend quarter panel")
+                self._add("Miscellaneous", "Glass Kit for Quarter Glass", 0.0, 0.0,
+                          "Required when R&I of the quarter glass. Includes urethane and primers for proper reseal.",
+                          trigger="R&I Quarter Glass")
+                self.suggestions[-1]["amount"] = 45.00
+            if "wheelhouse liner" not in ops_text and "wheel liner" not in ops_text and "rear wheel" not in ops_text:
+                self._add("Remove & Install", "R&I RT Rear Wheelhouse Liner", 0.3, self.body_rate,
+                          "Required for access to the quarter panel blend area and to protect the liner from overspray.",
+                          trigger="Blend quarter panel")
+            if "mask jamb" not in ops_text and "jamb" not in ops_text:
+                self._add("Miscellaneous", "Mask Jambs / Openings", 0.5, self.body_rate,
+                          "Required to protect door and liftgate openings from overspray when blending the quarter panel.",
+                          trigger="Blend quarter panel")
+            if "mask for primer" not in ops_text and "mask primer" not in ops_text:
+                self._add("Miscellaneous", "Mask for Primer", 0.3, self.paint_rate,
+                          "Required to protect adjacent panels and openings when priming the blend area.",
+                          trigger="Blend quarter panel")
+            if "pre-clean" not in ops_text and "pre clean" not in ops_text and "pre-wash" not in ops_text:
+                self._add("Miscellaneous", "Pre-Clean for Disassembly", 0.5, self.body_rate,
+                          "Required before disassembly to remove dirt and road film so materials and refinish adhere properly.",
+                          trigger="Any collision repair")
+            if "spray-out" not in ops_text and "spray out" not in ops_text and "sprayout" not in ops_text:
+                self._add("Repair Procedures", "Spray-out Cards", 0.5, self.paint_rate,
+                          "Before any color touches the car, the painter sprays test cards to confirm the mixed color actually matches under the booth lights. Required on non-black finishes.",
+                          trigger="Refinish / blend operation")
+
         # De-nib & finesse / finish sand & buff (not included in refinish time)
         if any(x in ops_text for x in ["refn", "refinish", "blend", "blnd", "clear coat"]) and "de-nib" not in ops_text and "finesse" not in ops_text and "buff" not in ops_text:
             self._add("Repair Procedures", "De-nib & finesse / finish sand & buff", 0.4, self.paint_rate,
@@ -517,6 +931,7 @@ class MissedOpsAnalyzer:
                 self._add("Repair Procedures", "Reset TPMS", 0.5, self.mech_rate,
                           "Once the wheels or tires have been worked, the tire-pressure sensors have to be relearned or the warning light stays on. This is the relearn that clears that light and gets the system reading each wheel correctly again. CCC lists this as a separate, billable operation (Scan tool clear / reset — Not Included).")
         why_parts = []
+        needs_alignment = False
         
         if any(x in ops_text for x in ["wheel", "tire", "rim", "suspension", "control arm", "strut", "knuckle"]):
             needs_alignment = True
@@ -546,7 +961,7 @@ class MissedOpsAnalyzer:
         ])
         if front_rear_hit and "measure" not in ops_text and "structural" not in ops_text and "frame" not in ops_text:
             self._add("Repair Procedures", "Setup and Measure", 1.0, self.body_rate,
-                      "A collision can push the body structure out of its factory dimensions, so the vehicle is set up and measured before the repair plan is final. Structural damage diagnosis and vehicle set up time is listed in CCC's Labor Time Premise as not included in any estimated work time.",
+                      "Structural damage diagnosis and vehicle set up time is listed in CCC's Labor Time Premise as not included in any estimated work time. A collision can push the body structure out of its factory dimensions, so the vehicle is set up and measured before the repair plan is final. Cited in CCC MOTOR Guide to Estimating — Labor Time Premise.",
                       trigger="Direct front or rear impact")
         plastic_parts = ["bumper", "grille", "mirror", "spoiler", "rocker", "molding", "fascia", "cover"]
         paint_ops = any(x in ops_text for x in ["refn", "refinish", "paint", "blend"])
@@ -558,9 +973,9 @@ class MissedOpsAnalyzer:
                 self.suggestions[-1]["description"] += " — est. $12"
         if "hazardous" not in ops_text and "waste" not in ops_text and "disposal" not in ops_text:
             self._add("Miscellaneous", "Hazardous waste disposal", 0.0, 0.0,
-                      "Required for disposal of paint waste, solvents, old parts, and other regulated materials. Typical flat fee $15–$35.")
-            self.suggestions[-1]["amount"] = 25.00
-            self.suggestions[-1]["description"] += " — est. $25"
+                      "Required for disposal of paint waste, solvents, old parts, and other regulated materials. P-Page code 10.")
+            self.suggestions[-1]["amount"] = 5.00  # P-Page code 10
+            self.suggestions[-1]["description"] += " — $5.00"
         electrical_parts = ["headlamp", "head lamp", "taillamp", "tail lamp", "mirror", "module", 
                            "sensor", "radar", "camera", "srs", "air bag", "restraint", "abs", "ecm"]
         if any(x in ops_text for x in electrical_parts):
@@ -640,10 +1055,13 @@ class MissedOpsAnalyzer:
         return self.suggestions
     
     def _add(self, category: str, description: str, hours: float, rate: float = None, why: str = "", trigger: str = ""):
+        # Handle calls that pass why as the 4th positional arg (no rate)
+        if isinstance(rate, str):
+            trigger = why if why else trigger
+            why = rate
+            rate = self.body_rate
         if rate is None:
             rate = self.body_rate
-        if isinstance(rate, str):
-            rate = float(rate)
         amount = hours * rate
         self.suggestions.append({
             "category": category,
@@ -657,7 +1075,7 @@ class MissedOpsAnalyzer:
         })
 
 
-def analyze_estimate(pdf_path: str, build_sheet_path: Optional[str] = None) -> Dict:
+def analyze_estimate(pdf_path: str, build_sheet_path: Optional[str] = None, oem_procedures_path: Optional[str] = None) -> Dict:
     parser = EstimateParser(pdf_path)
     data = parser.parse()
     build_sheet = None
@@ -669,6 +1087,11 @@ def analyze_estimate(pdf_path: str, build_sheet_path: Optional[str] = None) -> D
     analyzer = MissedOpsAnalyzer(data, build_sheet)
     suggestions = analyzer.analyze()
     
+    # OEM Procedures analysis (if provided)
+    if oem_procedures_path:
+        oem_suggestions = _analyze_oem_procedures(oem_procedures_path, data)
+        suggestions.extend(oem_suggestions)
+    
     total_missed = sum(s["amount"] for s in suggestions if s["selected"])
     
     return {
@@ -678,6 +1101,61 @@ def analyze_estimate(pdf_path: str, build_sheet_path: Optional[str] = None) -> D
         "total_potential": total_missed,
         "suggestion_count": len(suggestions)
     }
+
+
+def _analyze_oem_procedures(oem_path: str, estimate_data: Dict) -> List[Dict]:
+    """Extract R&I procedures, one-time use parts, and position statements from OEM PDF."""
+    import pdfplumber
+    suggestions = []
+    try:
+        with pdfplumber.open(oem_path) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    except Exception:
+        return suggestions
+    
+    text_lower = text.lower()
+    ops_text = " ".join([f"{i['operation']} {i['description']}" for i in estimate_data.get("line_items", [])]).lower()
+    
+    # Look for one-time use / non-reusable parts
+    if "one-time" in text_lower or "one time use" in text_lower or "non-reusable" in text_lower or "cannot be reused" in text_lower:
+        if "one-time" not in ops_text and "one time" not in ops_text:
+            suggestions.append({
+                "category": "Parts Differences",
+                "description": "One-time use parts (OEM procedures)",
+                "why": "OEM repair procedures list one-time use or non-reusable fasteners/clips. These must be replaced and are not included in the base labor time.",
+                "hours": 0.0,
+                "amount": 0.0,
+                "trigger": "OEM procedures PDF",
+                "selected": True
+            })
+    
+    # Look for ADAS / calibration mentions
+    if any(x in text_lower for x in ["calibration", "adas", "radar", "camera", "sensor"]):
+        if "calibrat" not in ops_text:
+            suggestions.append({
+                "category": "Pre/Post Scans",
+                "description": "ADAS calibration (from OEM procedures)",
+                "why": "OEM repair procedures reference ADAS components or calibrations. Verify which calibrations are required for this repair and add them if not present.",
+                "hours": 0.0,
+                "amount": 0.0,
+                "trigger": "OEM procedures PDF",
+                "selected": True
+            })
+    
+    # Look for R&I procedures that may be missing
+    for part in ["headliner", "overhead console", "kick panel", "sunshade", "garnish"]:
+        if part in text_lower and part not in ops_text:
+            suggestions.append({
+                "category": "Repair Procedures",
+                "description": f"R&I {part.title()} (from OEM procedures)",
+                "why": f"OEM repair procedures list R&I of the {part} as part of the repair access. This operation is not present on the estimate.",
+                "hours": 0.3,
+                "amount": 0.0,
+                "trigger": "OEM procedures PDF",
+                "selected": True
+            })
+    
+    return suggestions
 
 
 if __name__ == "__main__":

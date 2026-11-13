@@ -3,13 +3,20 @@
 Simple web interface for Estimate Review prototype.
 """
 
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, send_file
 import os
 import tempfile
+import io
 from estimate_analyzer import analyze_estimate
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+
+# Simple in-memory store for the last analysis (for PDF export)
+last_result = None
+
+# History of analyzed estimates
+history = []
 
 HTML = """
 <!DOCTYPE html>
@@ -60,12 +67,47 @@ HTML = """
     </div>
     <div class="container">
     {% if not result %}
-    <div class="upload">
+    {% if history %}
+    <div class="header">
+        <h1>Overview</h1>
+    </div>
+    <div class="stats">
+        <div class="stat">
+            <div class="label">Revenue recovered</div>
+            <div class="value">${{ "%.0f"|format(history|sum(attribute='total_potential')) }}</div>
+            <div class="sub">Avg. per estimate ${{ "%.0f"|format((history|sum(attribute='total_potential')) / (history|length)) }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Estimates</div>
+            <div class="value">{{ history|length }}</div>
+            <div class="sub">{{ history|sum(attribute='suggestion_count') }} missed operations</div>
+        </div>
+    </div>
+    <h3 style="margin:16px 0 8px;">Recent estimates</h3>
+    <div style="background:white;border:1px solid #e2e8f0;border-radius:8px;">
+        {% for h in history|reverse %}
+        <div style="padding:12px 16px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;">
+            <div>
+                <div style="font-size:0.75em;color:#64748b;">{{ h.date }}</div>
+                <div style="font-weight:600;"><a href="/history/{{ h.id }}" style="color:#1e40af;text-decoration:none;">{{ h.vehicle }}</a></div>
+                <div style="font-size:0.8em;color:#64748b;">{{ h.vin }}</div>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-weight:700;">${{ "%.0f"|format(h.total_potential) }}</div>
+                <div style="font-size:0.75em;color:#64748b;">RECOVERED</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <div class="upload" style="margin-top:24px;">
         <form method="post" enctype="multipart/form-data">
             <h3>Drop CCC ONE estimate PDF</h3>
             <input type="file" name="pdf" accept=".pdf"><br><br>
             <label>Optional: Vehicle Equipment Report (build sheet)</label><br>
             <input type="file" name="build_sheet" accept=".pdf"><br><br>
+            <label>Optional: OEM Repair Procedures PDF</label><br>
+            <input type="file" name="oem_procedures" accept=".pdf"><br><br>
             <button type="submit">Analyze Estimate</button>
             <button type="submit" name="demo" value="1" class="btn-secondary" style="margin-left:12px;">Demo with Sample</button>
         </form>
@@ -73,7 +115,9 @@ HTML = """
     {% else %}
     <div class="header">
         <h1>{{ result.estimate.year_make_model or 'Vehicle' }}</h1>
-        <p>RO #{{ result.estimate.ro_number or 'N/A' }}</p>
+        <p>RO #{{ result.estimate.ro_number or 'N/A' }} &nbsp;|&nbsp; VIN: {{ result.estimate.vin or 'N/A' }}</p>
+        <a href="/" class="btn" style="display:inline-block;margin-top:8px;text-decoration:none;margin-right:8px;">← Back to Overview</a>
+        <a href="/report.pdf" class="btn" style="display:inline-block;margin-top:8px;text-decoration:none;">Download PDF Report</a>
     </div>
     <div class="stats">
         <div class="stat">
@@ -83,22 +127,27 @@ HTML = """
         </div>
         <div class="stat">
             <div class="label">Selected</div>
-            <div class="value">$0.00</div>
-            <div class="sub">0 of {{ result.suggestion_count }}</div>
+            <div class="value" id="selected-total">$0.00</div>
+            <div class="sub" id="selected-count">0 of {{ result.suggestion_count }}</div>
         </div>
         <div class="stat">
             <div class="label">Base Estimate</div>
-            <div class="value">${{ "%.2f"|format(result.estimate.total or 0) }}</div>
+            <div class="value">${{ "%.2f"|format(result.estimate.totals.grand_total if result.estimate.totals else 0) }}</div>
             <div class="sub">Estimate grand total</div>
         </div>
         <div class="stat">
             <div class="label">Needs Input</div>
-            <div class="value">0</div>
-            <div class="sub">cards to finish</div>
+            <div class="value" id="needs-input">{{ result.suggestion_count }}</div>
+            <div class="sub">cards to review</div>
         </div>
     </div>
 
     <h3 style="margin-bottom:8px;">MISSED OPS <span class="badge">{{ result.suggestion_count }}</span></h3>
+    <form method="post" action="/supplement.pdf" id="supplement-form">
+    <div style="margin-bottom:12px;">
+        <label><input type="checkbox" id="select-all" checked onchange="toggleAll(this)"> Select all</label>
+        <button type="submit" style="margin-left:16px;background:#1e40af;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">Generate Supplement PDF</button>
+    </div>
     {% set categories = {} %}
     {% for s in result.suggestions %}
         {% if s.category not in categories %}
@@ -117,10 +166,13 @@ HTML = """
         </div>
         <div class="ops" id="cat-{{ loop.index }}">
             {% for s in items %}
-            <div class="op">
+            <div class="op" id="op-{{ loop.index0 }}">
                 <div class="op-header">
-                    <div class="op-title">{{ s.description }}</div>
-                    <div class="op-amount">${{ "%.2f"|format(s.amount) }}</div>
+                    <label><input type="checkbox" name="selected" value="{{ loop.index0 }}" checked class="op-check" data-amount="{{ s.amount }}" onchange="updateSelected()"> {{ s.description }}</label>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div class="op-amount">${{ "%.2f"|format(s.amount) }}</div>
+                        <button type="button" onclick="removeCard({{ loop.index0 }})" style="background:none;border:none;cursor:pointer;color:#ef4444;font-size:1.2em;" title="Remove">🗑</button>
+                    </div>
                 </div>
                 {% if s.trigger %}
                 <div class="section">
@@ -141,18 +193,60 @@ HTML = """
         </div>
     </div>
     {% endfor %}
+    </form>
+    <script>
+    function toggleAll(cb) {
+        document.querySelectorAll('.op-check').forEach(c => c.checked = cb.checked);
+        updateSelected();
+    }
+    function updateSelected() {
+        let total = 0;
+        let count = 0;
+        let needsInput = 0;
+        document.querySelectorAll('.op-check').forEach(c => {
+            if (c.checked && c.closest('.op').style.display !== 'none') {
+                total += parseFloat(c.dataset.amount) || 0;
+                count++;
+            }
+            if (c.closest('.op').style.display !== 'none') needsInput++;
+        });
+        document.getElementById('selected-total').textContent = '$' + total.toFixed(2);
+        document.getElementById('selected-count').textContent = count + ' of ' + needsInput;
+        document.getElementById('needs-input').textContent = needsInput;
+    }
+    function removeCard(idx) {
+        const card = document.getElementById('op-' + idx);
+        if (card) {
+            card.style.display = 'none';
+            const cb = card.querySelector('.op-check');
+            if (cb) cb.checked = false;
+            updateSelected();
+        }
+    }
+    // Initialize
+    updateSelected();
+    </script>
     {% endif %}
     </div>
 </body>
 </html>
 """
 
+@app.route('/history/<int:hist_id>')
+def view_history(hist_id):
+    """View a previously analyzed estimate."""
+    global last_result
+    for h in history:
+        if h.get("id") == hist_id:
+            last_result = h.get("result")
+            return render_template_string(HTML, result=last_result, history=history)
+    return "Estimate not found", 404
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     result = None
     if request.method == 'POST':
         if 'demo' in request.form:
-            # Load a sample estimate for demo
             sample = '/workspace/attachments/3722.pdf'
             if os.path.exists(sample):
                 result = analyze_estimate(sample)
@@ -163,19 +257,193 @@ def index():
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                 f.save(tmp.name)
                 build_sheet_tmp = None
+                oem_tmp = None
                 if 'build_sheet' in request.files and request.files['build_sheet'].filename:
                     bs = request.files['build_sheet']
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as bstmp:
                         bs.save(bstmp.name)
                         build_sheet_tmp = bstmp.name
+                if 'oem_procedures' in request.files and request.files['oem_procedures'].filename:
+                    oem = request.files['oem_procedures']
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as oemtmp:
+                        oem.save(oemtmp.name)
+                        oem_tmp = oemtmp.name
                 try:
-                    result = analyze_estimate(tmp.name, build_sheet_tmp)
+                    result = analyze_estimate(tmp.name, build_sheet_tmp, oem_tmp)
+                    global last_result
+                    last_result = result
+                    # Save to history
+                    from datetime import datetime
+                    history.append({
+                        "id": len(history),
+                        "date": datetime.now().strftime("%m/%d/%Y"),
+                        "vehicle": result.get("estimate", {}).get("year_make_model", "Unknown"),
+                        "vin": result.get("estimate", {}).get("vin", ""),
+                        "total_potential": result.get("total_potential", 0),
+                        "suggestion_count": result.get("suggestion_count", 0),
+                        "result": result,
+                    })
                 finally:
                     os.unlink(tmp.name)
                     if build_sheet_tmp and os.path.exists(build_sheet_tmp):
                         os.unlink(build_sheet_tmp)
+                    if oem_tmp and os.path.exists(oem_tmp):
+                        os.unlink(oem_tmp)
     
-    return render_template_string(HTML, result=result)
+    return render_template_string(HTML, result=result, history=history)
+
+@app.route('/supplement.pdf', methods=['POST'])
+def supplement_pdf():
+    """Generate a supplement PDF with only the selected items."""
+    global last_result
+    if not last_result:
+        return "No analysis available. Upload an estimate first.", 400
+    
+    selected_indices = request.form.getlist('selected')
+    selected_indices = [int(i) for i in selected_indices if i.isdigit()]
+    
+    # Flatten suggestions to match the index order used in the form
+    all_sugs = last_result.get("suggestions", [])
+    selected = [all_sugs[i] for i in selected_indices if i < len(all_sugs)]
+    
+    if not selected:
+        return "No items selected.", 400
+    
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from io import BytesIO
+    from datetime import datetime
+    
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.6*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
+    story = []
+    
+    est = last_result.get("estimate", {})
+    story.append(Paragraph("<b>Repair Supplement</b>", styles["Title"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(f"<b>Prepared by</b><br/>Ben's Body Works<br/>702 13th St, Phenix City, AL 36867<br/>(334) 297-5179", styles["Normal"]))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(f"<b>Vehicle</b><br/>{est.get('year_make_model', 'Unknown')}<br/>VIN: {est.get('vin', 'N/A')}", styles["Normal"]))
+    story.append(Paragraph(f"Date prepared: {datetime.now().strftime('%B %d, %Y')}", styles["Normal"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("The operations below are required to return this vehicle to pre-accident condition and were not included on the original estimate. We respectfully request review and approval of this supplement.", styles["Normal"]))
+    story.append(Spacer(1, 12))
+    
+    # Summary table
+    data = [["#", "Operation", "Body hr", "Paint hr", "Amount"]]
+    total = 0
+    for i, s in enumerate(selected, 1):
+        body_hr = s["hours"] if s.get("rate") == last_result.get("estimate", {}).get("labor_rates", {}).get("body", 0) else "-"
+        paint_hr = s["hours"] if s.get("rate") == last_result.get("estimate", {}).get("labor_rates", {}).get("paint", 0) else "-"
+        data.append([str(i), s["description"][:50], str(body_hr) if body_hr != "-" else "-", str(paint_hr) if paint_hr != "-" else "-", f"${s['amount']:.2f}"])
+        total += s["amount"]
+    data.append(["", "", "", "Total", f"${total:.2f}"])
+    
+    t = Table(data, colWidths=[0.4*inch, 3.5*inch, 0.8*inch, 0.8*inch, 1*inch])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -2), 0.5, colors.grey),
+        ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f1f5f9")),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 16))
+    
+    # Disclaimer
+    story.append(Paragraph("<b>Disclaimer</b>", styles["Heading3"]))
+    story.append(Paragraph("These are recommendations for operations you may be missing. You choose what to bill from the work you already did, or the work you plan to do. The carrier may negotiate or deny any line, and that negotiation is yours. This report does not endorse any publisher, and no publisher endorses this report. Source links to each OEM position statement are for reference and research only.", styles["Normal"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("I understand. I choose what to bill, and I negotiate with the carrier.", styles["Normal"]))
+    
+    doc.build(story)
+    buf.seek(0)
+    
+    from flask import send_file
+    return send_file(buf, mimetype='application/pdf', as_attachment=True, download_name='supplement.pdf')
+
+@app.route('/report.pdf')
+def report_pdf():
+    """Generate a PDF report of the last analysis."""
+    global last_result
+    if not last_result:
+        return "No analysis available. Upload an estimate first.", 400
+    
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.enums import TA_CENTER
+    from collections import defaultdict
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=0.55*inch, leftMargin=0.55*inch, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="TitleCenter", parent=styles["Title"], alignment=TA_CENTER, fontSize=15, spaceAfter=4))
+    styles.add(ParagraphStyle(name="Subtitle", parent=styles["Normal"], alignment=TA_CENTER, fontSize=9, textColor=colors.grey, spaceAfter=10))
+    styles.add(ParagraphStyle(name="SectionHead", parent=styles["Heading2"], fontSize=11, spaceBefore=8, spaceAfter=3, textColor=colors.HexColor("#1a365d")))
+    styles.add(ParagraphStyle(name="ItemTitle", parent=styles["Normal"], fontSize=9, leading=12, textColor=colors.HexColor("#1a365d"), spaceBefore=5))
+    styles.add(ParagraphStyle(name="WhyText", parent=styles["Normal"], fontSize=7.5, leading=10, textColor=colors.HexColor("#333333"), leftIndent=6))
+    styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=7.5, leading=9))
+    
+    story = []
+    est = last_result.get("estimate", {})
+    story.append(Paragraph("BEN'S BODY WORKS", styles["TitleCenter"]))
+    story.append(Paragraph("Estimate Review Report", styles["Subtitle"]))
+    story.append(Paragraph(f"{est.get('year_make_model', 'Vehicle')} &nbsp;|&nbsp; RO #{est.get('ro_number', 'N/A')}", styles["Subtitle"]))
+    
+    vehicle_data = [
+        [Paragraph("<b>Vehicle</b>", styles["Small"]), Paragraph(est.get("year_make_model", ""), styles["Small"])],
+        [Paragraph("<b>VIN</b>", styles["Small"]), Paragraph(est.get("vin", ""), styles["Small"])],
+        [Paragraph("<b>RO #</b>", styles["Small"]), Paragraph(est.get("ro_number", ""), styles["Small"])],
+    ]
+    vt = Table(vehicle_data, colWidths=[1.4*inch, 5.2*inch])
+    vt.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f4f8")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(vt)
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(f"<b>Summary:</b> {last_result.get('suggestion_count', 0)} potential missed items. Total potential: ${last_result.get('total_potential', 0):,.2f}", styles["Normal"]))
+    story.append(Spacer(1, 6))
+    
+    by_cat = defaultdict(list)
+    for s in last_result.get("suggestions", []):
+        by_cat[s["category"]].append(s)
+    
+    for cat in ["Pre/Post Scans", "Repair Procedures", "Miscellaneous", "Parts Differences"]:
+        if cat not in by_cat:
+            continue
+        story.append(Paragraph(cat, styles["SectionHead"]))
+        for s in by_cat[cat]:
+            desc = s["description"].split(" — est.")[0].strip()
+            amt = f"${s['amount']:,.2f}" if s["amount"] else ""
+            story.append(Paragraph(f"<b>{desc}</b> &nbsp;&nbsp; {amt}", styles["ItemTitle"]))
+            why = s.get("why", "")
+            if why:
+                story.append(Paragraph(why, styles["WhyText"]))
+            trig = s.get("trigger", "")
+            if trig:
+                story.append(Paragraph(f"<i>Trigger: {trig}</i>", styles["WhyText"]))
+        story.append(Spacer(1, 4))
+    
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("<i>This report identifies potential missed operations and materials based on OEM position statements, estimating system premises, and shop rules. Review each item before adding to the supplement.</i>", styles["Small"]))
+    
+    doc.build(story)
+    buffer.seek(0)
+    return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name="Estimate_Review_Report.pdf")
 
 if __name__ == "__main__":
     import os
