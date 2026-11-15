@@ -64,6 +64,7 @@ HTML = """
     <div class="topbar">
         <div class="logo">Estimate Review</div>
         <div>Ben's Body Works</div>
+        <a href="/" style="margin-left:auto;color:#1e40af;text-decoration:none;font-weight:500;">Home</a>
     </div>
     <div class="container">
     {% if not result %}

@@ -582,6 +582,10 @@ class MissedOpsAnalyzer:
                 self._add("Remove & Install", f"Drop Headliner ({lid_name} electrical access)", 0.8, self.body_rate,
                           f"Required to access the {lid_name} electrical connector for removal and reinstall. The headliner must be dropped to disconnect the wiring harness at the {lid_name}. CCC lists R&I of adjacent components for access as not included in the {lid_name} R&I time.",
                           trigger=f"{lid_name.title()} repair, replacement, or R&I")
+            if "chmsl" not in ops_text and "high-mount" not in ops_text and "stop lamp" not in ops_text and lid_name == "liftgate":
+                self._add("Repair Procedures", "R&I High-Mount Stop Lamp (CHMSL)", 0.2, self.body_rate,
+                          "Required for access when repairing or refinishing the liftgate. Only applies to true liftgates, not trunk lids or deck lids.",
+                          trigger="Liftgate repair")
 
         # Rear body panel replacement — comprehensive access and materials
         rear_body_repl = False
@@ -737,15 +741,22 @@ class MissedOpsAnalyzer:
                           "Required on the side of the quarter panel replacement. The roof rail air bag must be removed to protect it from weld heat and to access the sectioning joint. Follow OEM one-time-use fastener and torque requirements.",
                           trigger="Quarter panel replacement / sectioning")
             # Rear AC on vehicles equipped with rear climate control
-            if self._has_option(["rear ac", "rear a/c", "rear climate", "tri-zone", "tri zone"]) or "rear ac" in ops_text:
+            # Only applies to SUVs with 3rd row seating or multi-passenger vans/minivans
+            ymm = (self.data.get("year_make_model") or "").upper()
+            is_suv_or_van = any(x in ymm for x in ["SUV", "TAHOE", "SUBURBAN", "EXPEDITION", "NAVIGATOR", "ESCALADE", "YUKON", "SEQUOIA", "ARMADA", "QX80", "GX", "LX", "PILOT", "HIGHLANDER", "EXPLORER", "DURANGO", "TRAVERSE", "ENCLAVE", "ACADIA", "TELLURIDE", "PALISADE", "CARNIVAL", "ODYSSEY", "SIENNA", "PACIFICA", "VOYAGER", "SEDONA", "QUEST", "VAN", "MINIVAN"])
+            # Only check for 3rd row if build sheet is present
+            has_3rd_row = False
+            if self.build_sheet:
+                has_3rd_row = self._has_option(["3rd row", "third row", "rear ac", "rear a/c", "rear climate", "tri-zone", "tri zone", "captain"])
+            if is_suv_or_van or has_3rd_row:
                 if "evacuation" not in ops_text and "recharge" not in ops_text and "evacuate" not in ops_text:
                     self._add("Repair Procedures", "Evacuate and recharge rear AC system", 1.5, self.mech_rate,
-                              "Required when the rear AC unit is removed for access on a quarter panel replacement. The system must be evacuated before disconnecting lines and recharged after reassembly.",
-                              trigger="Quarter panel replacement + rear AC equipped")
+                              "Required when the rear AC unit is removed for access on a quarter panel replacement. The system must be evacuated before disconnecting lines and recharged after reassembly. Only applies to SUVs with 3rd row seating or multi-passenger vans/minivans.",
+                              trigger="Quarter panel replacement + rear AC equipped (SUV/van with 3rd row)")
                 if "rear ac" not in ops_text and "rear a/c" not in ops_text:
                     self._add("Repair Procedures", "R&I Rear AC unit (quarter panel access)", 1.8, self.mech_rate,
-                              "Required for access when replacing the quarter panel on the side of the rear AC unit. The unit sits against the quarter and must be removed to reach the weld zone.",
-                              trigger="Quarter panel replacement + rear AC equipped")
+                              "Required for access when replacing the quarter panel on the side of the rear AC unit. The unit sits against the quarter and must be removed to reach the weld zone. Only applies to SUVs with 3rd row seating or multi-passenger vans/minivans.",
+                              trigger="Quarter panel replacement + rear AC equipped (SUV/van with 3rd row)")
 
             # Additional OEMPro-style items for quarter panel replacement
             if "blend" not in ops_text and "blnd" not in ops_text:
@@ -801,9 +812,9 @@ class MissedOpsAnalyzer:
                     self._add("Repair Procedures", "Aluminum Repair Setup (Isolated Area & Dedicated Tools)", 1.0, self.body_rate,
                               "Required when repairing aluminum components (liftgate on this vehicle). Aluminum repair requires a dedicated isolated area and dedicated tools to prevent contamination.",
                               trigger="Aluminum component repair")
-            if "chmsl" not in ops_text and "high-mount" not in ops_text and "stop lamp" not in ops_text:
+            if "chmsl" not in ops_text and "high-mount" not in ops_text and "stop lamp" not in ops_text and lid_name == "liftgate":
                 self._add("Repair Procedures", "R&I High-Mount Stop Lamp (CHMSL)", 0.2, self.body_rate,
-                          "Required for access when repairing or refinishing the liftgate.",
+                          "Required for access when repairing or refinishing the liftgate. Only applies to true liftgates, not trunk lids or deck lids.",
                           trigger="Liftgate repair")
             if "lift cylinder" not in ops_text and "liftgate cylinder" not in ops_text:
                 self._add("Repair Procedures", "R&I Liftgate Lift Cylinders (both)", 0.4, self.body_rate,
@@ -828,9 +839,12 @@ class MissedOpsAnalyzer:
                           "Required for access when sectioning the quarter panel. The roof wiring harness runs along the roof rail and must be protected or removed during the weld zone work.",
                           trigger="Quarter panel replacement / sectioning")
             if "video display" not in ops_text and "rear seat entertainment" not in ops_text:
-                self._add("Repair Procedures", "R&I Video Display (Second / Third Row)", 0.4, self.body_rate,
-                          "Required for access when removing the headliner on vehicles equipped with rear seat entertainment. GM Video Display Replacement is part of the headliner R&I.",
-                          trigger="Quarter panel replacement / sectioning")
+                ymm = (self.data.get("year_make_model") or "").upper()
+                is_suv_or_van = any(x in ymm for x in ["SUV", "TAHOE", "SUBURBAN", "EXPEDITION", "NAVIGATOR", "ESCALADE", "YUKON", "SEQUOIA", "ARMADA", "QX80", "GX", "LX", "PILOT", "HIGHLANDER", "EXPLORER", "DURANGO", "TRAVERSE", "ENCLAVE", "ACADIA", "TELLURIDE", "PALISADE", "CARNIVAL", "ODYSSEY", "SIENNA", "PACIFICA", "VOYAGER", "SEDONA", "QUEST", "VAN", "MINIVAN"])
+                if is_suv_or_van:
+                    self._add("Repair Procedures", "R&I Video Display (Second / Third Row)", 0.4, self.body_rate,
+                              "Required for access when removing the headliner on vehicles equipped with rear seat entertainment. GM Video Display Replacement is part of the headliner R&I. Only applies to SUVs and minivans.",
+                              trigger="Quarter panel replacement / sectioning (SUV/van)")
             if "sir" not in ops_text and "disable" not in ops_text:
                 self._add("Repair Procedures", "SIR Disabling and Enabling", 0.5, self.mech_rate,
                           "Required before any work on or near the SRS / curtain air bag. GM SIR Disabling and Enabling procedure must be followed to prevent accidental deployment.",
