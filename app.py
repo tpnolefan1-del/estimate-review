@@ -7,16 +7,33 @@ from flask import Flask, request, render_template_string, jsonify, send_file
 import os
 import tempfile
 import io
+import json
 from estimate_analyzer import analyze_estimate
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
+# Persistent history file
+HISTORY_FILE = os.path.join(os.path.dirname(__file__), "history.json")
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_history(hist):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(hist, f)
+
+# Load history on startup
+history = load_history()
+
 # Simple in-memory store for the last analysis (for PDF export)
 last_result = None
-
-# History of analyzed estimates
-history = []
 
 HTML = """
 <!DOCTYPE html>
@@ -88,10 +105,13 @@ HTML = """
     <div style="background:white;border:1px solid #e2e8f0;border-radius:8px;">
         {% for h in history|reverse %}
         <div style="padding:12px 16px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;">
-            <div>
-                <div style="font-size:0.75em;color:#64748b;">{{ h.date }}</div>
-                <div style="font-weight:600;"><a href="/history/{{ h.id }}" style="color:#1e40af;text-decoration:none;">{{ h.vehicle }}</a></div>
-                <div style="font-size:0.8em;color:#64748b;">{{ h.vin }}</div>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <img src="https://via.placeholder.com/80x50?text={{ h.vehicle[:10] }}" alt="{{ h.vehicle }}" style="width:80px;height:50px;object-fit:cover;border-radius:4px;background:#e2e8f0;">
+                <div>
+                    <div style="font-size:0.75em;color:#64748b;">{{ h.date }}</div>
+                    <div style="font-weight:600;"><a href="/history/{{ h.id }}" style="color:#1e40af;text-decoration:none;">{{ h.vehicle }}</a></div>
+                    <div style="font-size:0.8em;color:#64748b;">{{ h.vin }}</div>
+                </div>
             </div>
             <div style="text-align:right;">
                 <div style="font-weight:700;">${{ "%.0f"|format(h.total_potential) }}</div>
@@ -284,6 +304,7 @@ def index():
                         "suggestion_count": result.get("suggestion_count", 0),
                         "result": result,
                     })
+                    save_history(history)
                 finally:
                     os.unlink(tmp.name)
                     if build_sheet_tmp and os.path.exists(build_sheet_tmp):
