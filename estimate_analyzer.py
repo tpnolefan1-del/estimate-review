@@ -232,11 +232,22 @@ class MissedOpsAnalyzer:
                 self._add("Repair Procedures", "Post-collision seat belt inspection", 0.5, self.mech_rate,
                           f"{matched_oem} requires inspection of all seat belts after any collision before returning the vehicle to the customer. Real-world inspections have uncovered deformed air bags and tweaked mounting brackets with no warning lights or DTCs. {matched_oem} requires replacement of any seat belt system in use during a deployment event or if components are torn, worn, or damaged. Cited in {matched_oem} collision repair position statements.",
                           trigger=f"{matched_oem} vehicle — any collision repair")
-        # Rule: GM ADAS bumper fascia — substrate repair not approved
+        # Rule: ADAS bumper fascia — substrate repair not approved
         if any(x in ops_text for x in ["bumper", "fascia"]) and any(x in ops_text for x in ["rpr", "repair", "substrate", "filler"]):
             if self._has_option(["radar", "acc", "adas", "parking", "blind"]) or "adas" in ops_text:
+                ymm = (self.data.get("year_make_model") or "").upper()
+                if any(x in ymm for x in ["KIA", "HYUNDAI", "GENESIS"]):
+                    why = "Kia Body Parts Use Statement (March 2017) states Kia cannot recommend the use of aftermarket body parts or structural components nor the use of body parts and components obtained from recycled salvage vehicles. Parts obtained outside of Kia's engineering process have no assurance that they have the crash protection afforded by Genuine Kia parts. Kia General Parts Position Statement states aftermarket parts may not perform up to Kia's carefully designed, developed and tested safety, performance and dependability standards. Position statements: https://www.bodyshopbusiness.com/video-presented-by-kia-3/"
+                elif any(x in ymm for x in ["FORD", "LINCOLN"]):
+                    why = "Ford (Oct 2025) strictly prohibits aftermarket, reconditioned, or salvage bumpers/fascias on ADAS-equipped vehicles. Ford limits topcoat refinish to ≤12 mils and does not approve fillers, reinforcement tape, plastic welding, or sonic-weld repairs on ADAS bumper fascias. Only genuine bumper assemblies are approved."
+                elif any(x in ymm for x in ["CHEVROLET", "GMC", "BUICK", "CADILLAC"]):
+                    why = "GM strictly prohibits aftermarket, reconditioned, or salvage bumpers/fascias on ADAS-equipped vehicles. Only genuine bumper assemblies are approved."
+                elif any(x in ymm for x in ["TOYOTA", "LEXUS"]):
+                    why = "Toyota CRIB #201 requires special precautions on 77 GHz radar vehicles. Only genuine bumper assemblies are approved."
+                else:
+                    why = "OEM position statements prohibit aftermarket, reconditioned, or salvage bumpers/fascias on ADAS-equipped vehicles. Only genuine bumper assemblies are approved."
                 self._add("Parts Differences", "ADAS bumper fascia substrate repair not approved — replace", 0.0, 0,
-                          "Ford (Oct 2025) and GM strictly prohibit aftermarket, reconditioned, or salvage bumpers/fascias on ADAS-equipped vehicles. Ford limits topcoat refinish to ≤12 mils and does not approve fillers, reinforcement tape, plastic welding, or sonic-weld repairs on ADAS bumper fascias. Toyota CRIB #201 requires special precautions on 77 GHz radar vehicles. Only genuine bumper assemblies are approved.",
+                          why,
                           trigger="Bumper fascia repair on ADAS-equipped vehicle")
 
         # Rule: Used / salvaged SRS components not approved
@@ -250,8 +261,15 @@ class MissedOpsAnalyzer:
                       trigger="Intrusion beam repair on estimate")
         # Rule: Bumper reinforcement repair is prohibited
         if any(x in ops_text for x in ["bumper reinforcement", "bumper beam", "impact bar"]) and any(x in ops_text for x in ["rpr", "repair", "straighten"]):
+            ymm = (self.data.get("year_make_model") or "").upper()
+            if any(x in ymm for x in ["KIA", "HYUNDAI", "GENESIS"]):
+                why = "Kia Body Parts Use Statement (March 2017) states Kia cannot recommend the use of aftermarket body parts or structural components. Bumper reinforcements are designed to absorb, channel, and dissipate collision energy. If damaged and repaired, they will no longer perform as intended. Damaged bumper reinforcements require replacement with Genuine Kia parts. Position statement: https://www.bodyshopbusiness.com/video-presented-by-kia-3/"
+            elif any(x in ymm for x in ["TOYOTA", "LEXUS"]):
+                why = "Toyota CRIB #161 states bumper reinforcement repair is prohibited. Bumper reinforcements are designed to absorb, channel, and dissipate collision energy. If damaged and repaired, they will no longer perform as intended. Damaged bumper reinforcements require replacement."
+            else:
+                why = "Bumper reinforcements are designed to absorb, channel, and dissipate collision energy. If damaged and repaired, they will no longer perform as intended. Damaged bumper reinforcements require replacement with genuine OEM parts."
             self._add("Parts Differences", "Bumper reinforcement must be replaced (not repaired)", 0.0, 0,
-                      "Toyota CRIB #161 states bumper reinforcement repair is prohibited. Bumper reinforcements are designed to absorb, channel, and dissipate collision energy. If damaged and repaired, they will no longer perform as intended. Damaged bumper reinforcements require replacement.",
+                      why,
                       trigger="Bumper reinforcement repair on estimate")
         if any(x in ops_text for x in ["rail", "pillar", "rocker", "reinforcement", "intrusion"]) and any(x in ops_text for x in ["rpr", "repair", "straighten"]):
             if "repl" not in ops_text:
@@ -314,6 +332,21 @@ class MissedOpsAnalyzer:
                 "quote": "Rivian does not recommend the use of aftermarket parts on any Rivian vehicle. Rivian does not support the use of aftermarket, Optional OEM (Opt-OE), alternative, reverse-engineered, used, salvaged, or externally re-manufactured parts. Rivian does not recommend the use of any salvaged, used, or recycled part that is a component of the Driver+ system (ADAS).",
                 "link": "https://oem1stop.com/sites/default/files/Rivian_Pos_Repair-Standards%284-28-26%29.pdf"
             },
+            "Honda": {
+                "makes": ["HONDA", "ACURA"],
+                "quote": "American Honda recommends that any repairs be performed by an experienced professional using a Honda body repair manual and Honda Genuine original equipment replacement parts designated for use in the specific Honda vehicle being repaired, including all mechanical and electrical parts, body panels, and structural components. American Honda does not support the use of aftermarket, alternative, reverse-engineered, or anything other than original equipment Honda or Acura parts for the collision repair of any Honda or Acura vehicle. American Honda does not support the use or re-use of structural components that have been removed and salvaged or recycled from an existing vehicle that has been previously damaged.",
+                "link": "https://oem1stop.com/"
+            },
+            "Hyundai": {
+                "makes": ["HYUNDAI"],
+                "quote": "HYUNDAI DOES NOT RECOMMEND THE USE OF COUNTERFEIT, GREY MARKET, AFTERMARKET, IMITATION, RECYCLED COLLISION REPAIR PARTS, ALTERNATE OR OTHER NON-ORIGINAL EQUIPMENT PARTS. Use of counterfeit, grey market, aftermarket, imitation, recycled collision parts or any alternative or other non-original equipment parts for the repair of any collision damaged vehicle may negatively affect vehicle crashworthiness and occupant safety during a collision and is not recommended by Hyundai.",
+                "link": "https://oem1stop.com/"
+            },
+            "Stellantis": {
+                "makes": ["CHRYSLER", "DODGE", "JEEP", "RAM", "FIAT", "ALFA"],
+                "quote": "FCA US LLC does not approve of the use of aftermarket or third-party replacement parts. FCA US LLC does not approve of the use of recycled, salvaged, aftermarket or reconditioned parts. Aftermarket parts are not subject to the same requirements of entire vehicle operation or function and may not be manufactured to the same standards or design. This could compromise the overall safety of the vehicle should a future collision occur.",
+                "link": "https://oem1stop.com/"
+            },
         }
         matched_oem = None
         matched_info = None
@@ -322,6 +355,28 @@ class MissedOpsAnalyzer:
                 matched_oem = oem
                 matched_info = info
                 break
+        # Honda-specific: Wheel repair not approved
+        if any(x in ymm for x in ["HONDA", "ACURA"]):
+            if any(x in ops_text for x in ["wheel"]) and any(x in ops_text for x in ["rpr", "repair", "straighten", "weld", "bend"]):
+                self._add("OEM Compliance", "Wheel repair not approved — replace", 0.0, 0.0,
+                          "American Honda (June 2007) does not approve of any repair of steel or aluminum wheels that involves welding, bending, hammering, straightening, re-machining, reforming, or adding new material. Any repair must be strictly limited to minor cosmetic sanding or polishing that removes just the finish. American Honda will not warrant any wheel other than an undamaged original or a new replacement part.",
+                          trigger="Wheel repair on Honda/Acura vehicle")
+            # Honda-specific: Non-repairable zones on bumper covers with BSI
+            if any(x in ops_text for x in ["bumper", "fascia"]) and any(x in ops_text for x in ["rpr", "repair", "substrate"]):
+                if self._has_option(["blind", "bsi", "radar"]) or "blind" in ops_text:
+                    self._add("OEM Compliance", "Non-repairable zones on bumper cover (BSI)", 0.0, 0.0,
+                              "Honda (September 2024) states damage to the bumper cover substrate such as cracks, dents, or abrasions within the radar wave emission range cannot be repaired and will require bumper cover replacement. Non-Honda Genuine bumper covers may be composed of materials and thickness specifications that differ from manufacturer specifications which may affect the safety performance of the ADAS. When replacement is necessary, new Honda Genuine bumper covers must be used.",
+                              trigger="Bumper repair on Honda/Acura with BSI")
+
+        # Stellantis-specific: Fascia repair with ADAS
+        if any(x in ymm for x in ["CHRYSLER", "DODGE", "JEEP", "RAM", "FIAT"]):
+            if any(x in ops_text for x in ["bumper", "fascia"]) and any(x in ops_text for x in ["rpr", "repair", "substrate", "filler"]):
+                if self._has_option(["blind", "bsm", "radar", "adas"]) or "adas" in ops_text:
+                    self._add("OEM Compliance", "Fascia repair with ADAS — limited", 0.0, 0.0,
+                              "FCA US LLC (December 2025) states repairs to the bumper cover near the BSM may cause Blind Spot False Activation. Any repair of the fascia substrate must not be carried out within 25 cm (approximately 10 inches) of the sensor mounting area. Fillers of any type must not be applied within the 25 cm blind spot sensor area. Do not exceed 12 mils (300 microns) or 3 topcoat finishes. Calibrations or initializations for the blind spot monitoring system must be performed prior to returning the vehicle to the customer. Post Scan utilizing a wiTECH scan tool must be performed after all repairs are completed.",
+                              trigger="Bumper/fascia repair on Stellantis vehicle with ADAS")
+
+        # OEM Parts Conversion — flag aftermarket parts when OEM prohibits them
         if matched_oem and matched_info:
             am_parts = []
             for item in self.data.get("line_items", []):
@@ -1011,14 +1066,29 @@ class MissedOpsAnalyzer:
                 self._add("Repair Procedures", "Weld burn Rpr/Refn (adjacent panels)", 0.5, self.body_rate,
                           "Adjacent panels often require repair and refinish from weld heat/burn. Commonly missed on sectioning or panel replacement.")
         if "calibrat" not in ops_text and "adas" not in ops_text:
-            # Front camera (windshield or forward-facing camera work)
-            if any(x in ops_text for x in ["windshield", "cowl", "camera"]):
-                if self._has_option(["camera", "lane", "forward collision", "adas"]):
-                    self._add("Pre/Post Scans", "Static Forward Facing Camera Calibration", 0.0, 0.0,
-                              "Honda requires software-based aiming of the forward camera (ACC, CMBS, LKAS, LDW, etc.) after windshield R&R or camera R&I. Systems often will not display DTCs unless damaged, so aiming may still be required. Four-wheel alignment should be verified before aiming. Only i-HDS is approved. Typical invoice $550.",
-                              trigger="Windshield / camera work")
-                    self.suggestions[-1]["amount"] = 550.00
-                    self.suggestions[-1]["description"] += " — est. $550"
+            # Forward facing camera — only if bumper, grille, or mirror is removed AND option is confirmed
+            camera_trigger = any(x in ops_text for x in ["bumper", "grille", "mirror"])
+            camera_equipped = self._has_option(["camera", "lane", "forward collision", "adas", "surround", "360"])
+            if camera_trigger and camera_equipped:
+                ymm = (self.data.get("year_make_model") or "").upper()
+                # OEM-specific language
+                if any(x in ymm for x in ["KIA", "HYUNDAI", "GENESIS"]):
+                    why = "Kia/Hyundai requires forward-facing camera calibration after bumper, grille, or mirror removal. The camera must be aimed using the OEM scan tool. Four-wheel alignment should be verified before aiming. Typical invoice $550."
+                elif any(x in ymm for x in ["HONDA", "ACURA"]):
+                    why = "Honda requires software-based aiming of the forward camera (ACC, CMBS, LKAS, LDW, etc.) after bumper, grille, or mirror R&I. Systems often will not display DTCs unless damaged, so aiming may still be required. Four-wheel alignment should be verified before aiming. Only i-HDS is approved. Typical invoice $550."
+                elif any(x in ymm for x in ["NISSAN", "INFINITI"]):
+                    why = "Nissan requires forward-facing camera calibration after bumper, grille, or mirror removal using the CONSULT diagnostic tool. Four-wheel alignment should be verified before aiming. Typical invoice $550."
+                elif any(x in ymm for x in ["FORD", "LINCOLN"]):
+                    why = "Ford requires forward-facing camera calibration after bumper, grille, or mirror removal using FDRS. Four-wheel alignment should be verified before aiming. Typical invoice $550."
+                elif any(x in ymm for x in ["CHEVROLET", "GMC", "BUICK", "CADILLAC"]):
+                    why = "GM requires forward-facing camera calibration after bumper, grille, or mirror removal. Four-wheel alignment should be verified before aiming. Typical invoice $550."
+                else:
+                    why = "Forward-facing camera calibration is required after bumper, grille, or mirror removal. Four-wheel alignment should be verified before aiming. Typical invoice $550."
+                self._add("Pre/Post Scans", "Static Forward Facing Camera Calibration", 0.0, 0.0,
+                          why,
+                          trigger="Bumper / grille / mirror removal + camera equipped")
+                self.suggestions[-1]["amount"] = 550.00
+                self.suggestions[-1]["description"] += " — est. $550"
 
             # Front radar / ACC (bumper, grille, front-end) — only if equipped or no build sheet
             if any(x in ops_text for x in ["bumper", "grille", "radar", "acc"]):
